@@ -1,110 +1,103 @@
-# Databricks notebook source
-# MAGIC %md
-# MAGIC 1- bronze_ingestion
+-- Databricks notebook source
+-- Franchise customer feedback: medallion pipeline (bronze -> silver -> gold)
+--
+-- Source data: samples.bakehouse (Databricks sample datasets)
+-- Tables are created in the notebook's current catalog and schema.
 
-# COMMAND ----------
+-- COMMAND ----------
 
-# MAGIC %sql
-# MAGIC SELECT * FROM samples.bakehouse.media_customer_reviews;
 
-# COMMAND ----------
+-- 0. EXPLORE THE SOURCES
+-- ============================================================
 
-# MAGIC %sql
-# MAGIC SELECT * FROM samples.bakehouse.sales_franchises;
+SELECT * FROM samples.bakehouse.media_customer_reviews LIMIT 10;
 
-# COMMAND ----------
+-- COMMAND ----------
 
-# MAGIC %md
-# MAGIC creating bronze table for customer reviews.
+SELECT * FROM samples.bakehouse.sales_franchises LIMIT 10;
 
-# COMMAND ----------
+-- COMMAND ----------
 
-# MAGIC %sql
-# MAGIC CREATE TABLE IF NOT EXISTS bronze_customer_reviews (
-# MAGIC     review STRING,
-# MAGIC     franchiseID LONG,
-# MAGIC     review_date TIMESTAMP,
-# MAGIC     new_id INT
-# MAGIC );
-# MAGIC SELECT * FROM bronze_customer_reviews
-# MAGIC
-# MAGIC
+-- Check the exact column names before building the bronze tables
+DESCRIBE samples.bakehouse.media_customer_reviews;
 
-# COMMAND ----------
+-- COMMAND ----------
 
-# MAGIC %md
-# MAGIC Creating bronze table for sales franchise
 
-# COMMAND ----------
+-- 1. BRONZE: raw copies of the source tables
+-- ============================================================
 
-# MAGIC %sql
-# MAGIC CREATE TABLE bronze_sales_franchises AS
-# MAGIC SELECT * FROM samples.bakehouse.sales_franchises
+-- Customer reviews
+CREATE OR REPLACE TABLE bronze_customer_reviews AS
+SELECT
+    review,
+    franchise_id AS franchiseID,   -- if DESCRIBE shows franchiseID, remove the alias
+    review_date,
+    new_id
+FROM samples.bakehouse.media_customer_reviews;
 
-# COMMAND ----------
+-- COMMAND ----------
 
-# MAGIC %sql
-# MAGIC SELECT * FROM bronze_sales_franchises
-# MAGIC
+-- Franchises
+CREATE OR REPLACE TABLE bronze_sales_franchises AS
+SELECT * FROM samples.bakehouse.sales_franchises;
 
-# COMMAND ----------
+-- COMMAND ----------
 
-# MAGIC %md
-# MAGIC 02- silver cleaning and join
+-- Check: both tables should contain rows
+SELECT 'bronze_customer_reviews' AS table_name, COUNT(*) AS row_count FROM bronze_customer_reviews
+UNION ALL
+SELECT 'bronze_sales_franchises', COUNT(*) FROM bronze_sales_franchises;
 
-# COMMAND ----------
+-- COMMAND ----------
 
-# MAGIC %sql
-# MAGIC CREATE OR REPLACE TABLE silver_franchise_feedback AS
-# MAGIC SELECT 
-# MAGIC bronze_customer_reviews.franchiseID,
-# MAGIC UPPER (City) AS city,
-# MAGIC UPPER (Country) AS country,
-# MAGIC TRIM (review) AS review,
-# MAGIC review_date AS review_timestamp
-# MAGIC FROM bronze_customer_reviews
-# MAGIC INNER JOIN bronze_sales_franchises
-# MAGIC ON bronze_customer_reviews.franchiseID = bronze_sales_franchises.franchiseID
-# MAGIC WHERE review IS NOT NULL
-# MAGIC AND review !='';
-# MAGIC     
-# MAGIC
-# MAGIC
+-- ============================================================
+-- 2. SILVER: clean and join
+--    - keeps only reviews that have text
+--    - trims whitespace from reviews
+--    - upper-cases city and country
+--    - adds the franchise location to each review
+-- ============================================================
 
-# COMMAND ----------
+CREATE OR REPLACE TABLE silver_franchise_feedback AS
+SELECT
+    r.franchiseID,
+    UPPER(f.city)    AS city,
+    UPPER(f.country) AS country,
+    TRIM(r.review)   AS review,
+    r.review_date    AS review_timestamp
+FROM bronze_customer_reviews AS r
+INNER JOIN bronze_sales_franchises AS f
+    ON r.franchiseID = f.franchiseID
+WHERE r.review IS NOT NULL
+  AND TRIM(r.review) <> '';
 
-# MAGIC %sql
-# MAGIC SELECT * FROM silver_franchise_feedback
+-- COMMAND ----------
 
-# COMMAND ----------
+SELECT * FROM silver_franchise_feedback LIMIT 100;
 
-# MAGIC %md
-# MAGIC 03- gold business aggregations
-# MAGIC
+-- COMMAND ----------
 
-# COMMAND ----------
+-- ============================================================
+-- 3. GOLD: business aggregation
+--    Number of reviews received per city and country
+-- ============================================================
 
-# MAGIC %sql
-# MAGIC CREATE OR REPLACE TABLE gold_city_feedback AS
-# MAGIC SELECT
-# MAGIC city,
-# MAGIC country,
-# MAGIC COUNT (review) AS total_review_received
-# MAGIC FROM
-# MAGIC silver_franchise_feedback
-# MAGIC GROUP BY
-# MAGIC city,country
-# MAGIC ORDER BY total_review_received DESC
-# MAGIC     
-# MAGIC
+CREATE OR REPLACE TABLE gold_city_feedback AS
+SELECT
+    city,
+    country,
+    COUNT(review) AS total_review_received
+FROM silver_franchise_feedback
+GROUP BY city, country;
 
-# COMMAND ----------
+-- COMMAND ----------
 
-# MAGIC %sql
-# MAGIC SELECT * FROM gold_city_feedback
+SELECT *
+FROM gold_city_feedback
+ORDER BY total_review_received DESC;
 
-# COMMAND ----------
+-- COMMAND ----------
 
-# MAGIC %md
-# MAGIC NOW the data can be use for analyzing the location and review received from each country and city
-# MAGIC
+-- The gold table can now be used to analyze where franchise reviews
+-- come from, by country and city.
